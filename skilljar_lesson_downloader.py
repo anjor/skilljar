@@ -15,9 +15,14 @@ import argparse
 from urllib.parse import urljoin, urlparse
 from dotenv import load_dotenv
 import re
+import urllib3
+from urllib3.exceptions import InsecureRequestWarning
 
 # Load environment variables
 load_dotenv()
+
+# Disable SSL warnings for corporate environments
+urllib3.disable_warnings(InsecureRequestWarning)
 
 
 class SkilljarDownloader:
@@ -35,6 +40,7 @@ class SkilljarDownloader:
         self.base_url = base_url.rstrip('/')
         self.session = requests.Session()
         self.session.auth = (api_key, '')  # Basic auth with API key as username, empty password
+        self.session.verify = False  # Disable SSL verification for corporate environments
         self.session.headers.update({
             'Content-Type': 'application/json',
             'Accept': 'application/json'
@@ -201,7 +207,7 @@ class SkilljarDownloader:
     def _download_file(self, url: str, output_dir: Path, filename_prefix: str, use_extension: bool = True) -> None:
         """Download a file from a URL."""
         try:
-            response = requests.get(url, stream=True)
+            response = requests.get(url, stream=True, verify=False)
             response.raise_for_status()
             
             # Determine filename

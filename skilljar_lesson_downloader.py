@@ -12,8 +12,9 @@ import requests
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 import argparse
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from dotenv import load_dotenv
+import re
 
 # Load environment variables
 load_dotenv()
@@ -112,6 +113,36 @@ class SkilljarDownloader:
             print(f"Warning: Could not fetch content items for lesson {lesson_id}")
             return []
     
+    def _extract_urls_from_html(self, html_content: str) -> List[str]:
+        """Extract image and asset URLs from HTML content."""
+        if not html_content:
+            return []
+        
+        # Pattern to match src attributes in img, video, audio, source, and embed tags
+        patterns = [
+            r'<img[^>]+src=["\']([^"\']+)["\']',
+            r'<video[^>]+src=["\']([^"\']+)["\']',
+            r'<audio[^>]+src=["\']([^"\']+)["\']',
+            r'<source[^>]+src=["\']([^"\']+)["\']',
+            r'<embed[^>]+src=["\']([^"\']+)["\']',
+            r'<iframe[^>]+src=["\']([^"\']+)["\']',
+            # Also look for href attributes in links to PDFs, docs, etc.
+            r'<a[^>]+href=["\']([^"\']+\.(?:pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar))["\']',
+        ]
+        
+        urls = []
+        for pattern in patterns:
+            matches = re.findall(pattern, html_content, re.IGNORECASE)
+            urls.extend(matches)
+        
+        # Filter out relative URLs and invalid URLs
+        valid_urls = []
+        for url in urls:
+            if url.startswith(('http://', 'https://')):
+                valid_urls.append(url)
+        
+        return valid_urls
+
     def download_lesson_content(self, lesson: Dict, output_dir: Path) -> None:
         """Download content for a specific lesson."""
         lesson_id = lesson['id']
@@ -137,35 +168,62 @@ class SkilljarDownloader:
             with open(content_file, 'w', encoding='utf-8') as f:
                 json.dump(content_items, f, indent=2, ensure_ascii=False)
         
-        # Download actual content files if URLs are provided
+        # Download direct content files if URLs are provided
         for i, content_item in enumerate(content_items):
             if 'url' in content_item or 'file_url' in content_item:
                 file_url = content_item.get('url') or content_item.get('file_url')
                 if file_url:
                     self._download_file(file_url, lesson_dir, f"content_{i}")
         
+        # Extract and download assets from HTML content
+        asset_counter = 0
+        for i, content_item in enumerate(content_items):
+            html_content = content_item.get('content_html', '')
+            if html_content:
+                urls = self._extract_urls_from_html(html_content)
+                for url in urls:
+                    try:
+                        # Create a descriptive filename
+                        parsed_url = urlparse(url)
+                        original_filename = Path(parsed_url.path).name
+                        if original_filename:
+                            filename_prefix = f"asset_{asset_counter}_{original_filename}"
+                        else:
+                            filename_prefix = f"asset_{asset_counter}"
+                        
+                        self._download_file(url, lesson_dir, filename_prefix, use_extension=False)
+                        asset_counter += 1
+                    except Exception as e:
+                        print(f"    Failed to download asset {url}: {e}")
+        
         time.sleep(0.2)  # Rate limiting
     
-    def _download_file(self, url: str, output_dir: Path, filename_prefix: str) -> None:
+    def _download_file(self, url: str, output_dir: Path, filename_prefix: str, use_extension: bool = True) -> None:
         """Download a file from a URL."""
         try:
             response = requests.get(url, stream=True)
             response.raise_for_status()
             
-            # Try to determine file extension from URL or content type
-            file_extension = ""
-            if '.' in url.split('/')[-1]:
-                file_extension = '.' + url.split('/')[-1].split('.')[-1]
-            elif 'content-type' in response.headers:
-                content_type = response.headers['content-type'].lower()
-                if 'video' in content_type:
-                    file_extension = '.mp4'
-                elif 'pdf' in content_type:
-                    file_extension = '.pdf'
-                elif 'image' in content_type:
-                    file_extension = '.jpg'
+            # Determine filename
+            if use_extension:
+                # Try to determine file extension from URL or content type
+                file_extension = ""
+                if '.' in url.split('/')[-1]:
+                    file_extension = '.' + url.split('/')[-1].split('.')[-1]
+                elif 'content-type' in response.headers:
+                    content_type = response.headers['content-type'].lower()
+                    if 'video' in content_type:
+                        file_extension = '.mp4'
+                    elif 'pdf' in content_type:
+                        file_extension = '.pdf'
+                    elif 'image' in content_type:
+                        file_extension = '.jpg'
+                
+                filename = f"{filename_prefix}{file_extension}"
+            else:
+                # Use the filename_prefix as-is (it already contains the extension)
+                filename = filename_prefix
             
-            filename = f"{filename_prefix}{file_extension}"
             filepath = output_dir / filename
             
             with open(filepath, 'wb') as f:
